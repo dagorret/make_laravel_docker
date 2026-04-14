@@ -124,8 +124,14 @@ main() {
     "18" "17" "16" "15" "14")"
 
   local NODE_VER
-  read -r -p "Node.js version for frontend tooling (leave blank to skip): " NODE_VER
-  NODE_VER="${NODE_VER:-}"
+  NODE_VER="$(choose_option \
+    "Select the Node.js version for frontend tooling" \
+    "none" \
+    "none" "18" "20" "22" "24")"
+
+  if [[ "$NODE_VER" == "none" ]]; then
+    NODE_VER=""
+  fi
 
   local USE_REDIS
   USE_REDIS="$(choose_yes_no \
@@ -181,14 +187,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 EOF
 
   if [[ -n "$NODE_VER" ]]; then
-  cat >> Dockerfile <<EOF
+    cat >> Dockerfile <<EOF
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - \\
  && apt-get update && apt-get install -y --no-install-recommends nodejs \\
+ && command -v node \\
+ && command -v npm \\
  && node --version \\
  && npm --version \\
  && rm -rf /var/lib/apt/lists/*
 EOF
-fi
+  fi
 
   if [[ "$USE_REDIS" == "y" ]]; then
     cat >> Dockerfile <<'EOF'
