@@ -69,6 +69,12 @@ safe_env() {
   fi
 }
 
+run_in_app() {
+  local container_name="$1"
+  shift
+  podman exec -i -w /var/www "$container_name" "$@"
+}
+
 main() {
   clear
   echo -e "${BLUE}========================================${NC}"
@@ -320,26 +326,26 @@ EOF
 
   echo
   echo -e "${GREEN}Generating application key...${NC}"
-  $COMPOSE_CMD exec -T app php artisan key:generate
+  run_in_app "${SAFE_NAME}_app" php artisan key:generate
 
   echo
   echo -e "${GREEN}Running database migrations...${NC}"
-  $COMPOSE_CMD exec -T app php artisan migrate
+  run_in_app "${SAFE_NAME}_app" php artisan migrate
 
   if [[ -n "$NODE_VER" ]]; then
     echo
     echo -e "${GREEN}Installing frontend dependencies...${NC}"
-    $COMPOSE_CMD exec -T app npm install
+    run_in_app "${SAFE_NAME}_app" npm install
 
     if [[ "$INSTALL_PRIMEVUE" == "y" ]]; then
       echo
       echo -e "${GREEN}Installing PrimeVue packages...${NC}"
-      $COMPOSE_CMD exec -T app npm install primevue @primevue/themes primeicons
+      run_in_app "${SAFE_NAME}_app" npm install primevue @primevue/themes primeicons
     fi
 
     echo
     echo -e "${GREEN}Building frontend assets...${NC}"
-    $COMPOSE_CMD exec -T app npm run build
+    run_in_app "${SAFE_NAME}_app" npm run build
   fi
 
   cat > p <<'EOF'
@@ -355,11 +361,12 @@ Useful commands:
   ${COMPOSE_CMD} up -d
   ${COMPOSE_CMD} down
   ${COMPOSE_CMD} logs -f
-  ${COMPOSE_CMD} exec app bash
+  podman exec -it ${SAFE_NAME}_app bash
 
 Helper:
   ./p up -d
-  ./p exec app bash
+  ./p down
+  ./p logs -f
 
 Application URL:
   http://localhost:8080
