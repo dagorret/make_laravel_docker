@@ -69,10 +69,54 @@ safe_env() {
   fi
 }
 
+container_exists() {
+  local name="$1"
+  podman container exists "$name" >/dev/null 2>&1
+}
+
+remove_project_containers() {
+  local project="$1"
+  local names=(
+    "${project}_app"
+    "${project}_db"
+    "${project}_nginx"
+    "${project}_redis"
+    "${project}_adminer"
+  )
+
+  for name in "${names[@]}"; do
+    if container_exists "$name"; then
+      echo -e "${YELLOW}Removing existing container: ${name}${NC}"
+      podman rm -f "$name" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+wait_for_container_running() {
+  local name="$1"
+  local retries="${2:-20}"
+  local delay="${3:-2}"
+  local i
+
+  for ((i=1; i<=retries; i++)); do
+    if podman ps --format '{{.Names}}' | grep -Fx "$name" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$delay"
+  done
+
+  return 1
+}
+
 run_in_app() {
   local container_name="$1"
   shift
-  podman exec -i -w /var/www "$container_name" "$@"
+
+  podman exec \
+    -i \
+    --workdir /var/www \
+    "$container_name" \
+    "$@"
 }
 
 main() {
@@ -89,6 +133,7 @@ main() {
   require_cmd id
   require_cmd mkdir
   require_cmd cp
+  require_cmd pwd
 
   local COMPOSE_CMD
   if podman compose version >/dev/null 2>&1; then
@@ -111,11 +156,10 @@ main() {
   local SAFE_NAME
   SAFE_NAME="$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
 
-  if [[ -e "$SAFE_NAME" ]]; then
-    echo -e "${RED}Target directory already exists: $SAFE_NAME${NC}"
-    echo "Remove it or choose another project name."
-    exit 1
-  fi
+  local CLEANUP_OLD
+  CLEANUP_OLD="$(choose_yes_no \
+    "Remove old containers with the same project name if they exist? (y/n)" \
+    "y")"
 
   local PHP_VER
   PHP_VER="$(choose_option \
@@ -157,29 +201,43 @@ main() {
     "adminer" \
     "adminer" "none")"
 
-  echo
-  echo -e "${GREEN}Stage 1/4 - Creating project directory on host...${NC}"
-  mkdir -p "$SAFE_NAME"
+  local BASE_PATH
+  BASE_PATH="$(pwd)"
+  local PROJECT_PATH="${BASE_PATH}/${SAFE_NAME}"
 
-  if [[ ! -w "$SAFE_NAME" ]]; then
-    echo -e "${RED}The target directory is not writable: $(pwd)/$SAFE_NAME${NC}"
+  if [[ "$CLEANUP_OLD" == "y" ]]; then
+    remove_project_containers "$SAFE_NAME"
+  fi
+
+  if [[ -e "$PROJECT_PATH" ]]; then
+    echo -e "${RED}Target directory already exists: ${PROJECT_PATH}${NC}"
+    echo "Remove it or choose another project name."
     exit 1
   fi
 
   echo
-  echo -e "${GREEN}Stage 2/4 - Bootstrapping Laravel in a temporary container directory...${NC}"
+  echo -e "${GREEN}Stage 1/5 - Creating project directory on host...${NC}"
+  mkdir -p "$PROJECT_PATH"
+
+  if [[ ! -w "$PROJECT_PATH" ]]; then
+    echo -e "${RED}The target directory is not writable: ${PROJECT_PATH}${NC}"
+    exit 1
+  fi
+
+  echo
+  echo -e "${GREEN}Stage 2/5 - Bootstrapping Laravel in a temporary container directory...${NC}"
   podman run --rm \
     --userns=keep-id \
-    -v "$(pwd)/$SAFE_NAME:/app" \
+    -v "${PROJECT_PATH}:/app" \
     -w /tmp \
     docker.io/library/composer:2 \
     sh -lc 'composer create-project laravel/laravel /tmp/laravel-src && cp -a /tmp/laravel-src/. /app/'
 
-  cd "$SAFE_NAME"
+  cd "$PROJECT_PATH"
   mkdir -p docker/nginx
 
   echo
-  echo -e "${GREEN}Stage 3/4 - Writing container configuration files...${NC}"
+  echo -e "${GREEN}Stage 3/5 - Writing container configuration files...${NC}"
 
   cat > Dockerfile <<EOF
 FROM docker.io/library/php:${PHP_VER}-fpm-trixie
@@ -304,8 +362,22 @@ server {
 EOF
 
   echo
-  echo -e "${GREEN}Stage 4/4 - Starting containers and configuring Laravel...${NC}"
+  echo -e "${GREEN}Stage 4/5 - Starting containers...${NC}"
   $COMPOSE_CMD up -d --build
+
+  echo
+  echo -e "${GREEN}Stage 5/5 - Waiting for app container and configuring Laravel...${NC}"
+
+  if ! wait_for_container_running "${SAFE_NAME}_app" 20 2; then
+    echo -e "${RED}App container is not running: ${SAFE_NAME}_app${NC}"
+    podman ps -a
+    exit 1
+  fi
+
+  if ! podman exec "${SAFE_NAME}_app" test -f /var/www/artisan; then
+    echo -e "${RED}Laravel was not found inside the app container.${NC}"
+    exit 1
+  fi
 
   safe_env DB_CONNECTION pgsql
   safe_env DB_HOST db
@@ -390,7 +462,7 @@ EOF
   echo
   echo -e "${BLUE}========================================${NC}"
   echo -e "${GREEN}Project created successfully${NC}"
-  echo -e "Project folder: ${BLUE}$(pwd)${NC}"
+  echo -e "Project folder: ${BLUE}${PROJECT_PATH}${NC}"
   echo -e "Application URL: ${BLUE}http://localhost:8080${NC}"
   if [[ "$DB_ADMIN" == "adminer" ]]; then
     echo -e "Adminer URL: ${BLUE}http://localhost:8081${NC}"
