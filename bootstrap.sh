@@ -1,69 +1,3 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
-
-trap 'echo -e "\n${RED}❌ Error at line ${LINENO}. Aborting.${NC}"' ERR
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo -e "${RED}Missing required command: $1${NC}"
-    exit 1
-  }
-}
-
-choose_option() {
-  local title="$1"
-  local default="$2"
-  shift 2
-  local options=("$@")
-  local input
-
-  echo -e "\n${BLUE}${title}${NC}"
-  echo "Options: ${options[*]}"
-  read -r -p "Select [${default}]: " input
-  input="${input:-$default}"
-
-  for opt in "${options[@]}"; do
-    if [[ "$opt" == "$input" ]]; then
-      echo "$input"
-      return 0
-    fi
-  done
-
-  echo -e "${YELLOW}Invalid option. Using ${default}.${NC}" >&2
-  echo "$default"
-}
-
-choose_yes_no() {
-  local title="$1"
-  local default="$2"
-  local input
-
-  read -r -p "$title [$default]: " input
-  input="${input:-$default}"
-
-  case "$input" in
-    y|Y|yes|YES) echo "y" ;;
-    n|N|no|NO) echo "n" ;;
-    *) echo "$default" ;;
-  esac
-}
-
-safe_env() {
-  local key="$1"
-  local value="$2"
-  if grep -q "^${key}=" .env; then
-    sed -i "s|^${key}=.*|${key}=${value}|" .env
-  else
-    echo "${key}=${value}" >> .env
-  fi
-}
-
 clear
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}   🚀 Laravel Podman Bootstrap         ${NC}"
@@ -79,16 +13,32 @@ else
   COMPOSE="podman-compose"
 fi
 
-read -p "Project name [app]: " NAME
+read -r -p "Project name to create [app]: " NAME
 NAME=${NAME:-app}
 SAFE=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')
 
-PHP=$(choose_option "PHP Version" "8.4" "8.4" "8.3" "8.2")
-PG=$(choose_option "PostgreSQL Version" "17" "17" "16" "15")
+PHP=$(choose_option \
+  "Select the PHP version for the application" \
+  "8.4" \
+  "8.4" "8.3" "8.2")
 
-read -p "Node version (empty = none): " NODE
-REDIS=$(choose_yes_no "Use Redis? (y/n)" "n")
-PRIME=$(choose_yes_no "Install PrimeVue? (y/n)" "n")
+PG=$(choose_option \
+  "Select the PostgreSQL version for the database container" \
+  "17" \
+  "18" "17" "16" "15" "14")
+
+read -r -p "Node.js version for frontend tooling (leave blank to skip): " NODE
+
+REDIS=$(choose_yes_no \
+  "Enable Redis for cache, queues and sessions? (y/n)" \
+  "n")
+
+PRIME="n"
+if [[ -n "$NODE" ]]; then
+  PRIME=$(choose_yes_no \
+    "Install PrimeVue UI components? (y/n)" \
+    "n")
+fi
 
 mkdir -p "$SAFE"/docker/nginx
 cd "$SAFE"
@@ -171,7 +121,7 @@ server {
 EOF
 
 echo "Installing Laravel..."
-podman run --rm -v $(pwd):/app -w /app composer:2 \
+podman run --rm -v "$(pwd):/app" -w /app docker.io/library/composer:2 \
   composer create-project laravel/laravel .
 
 $COMPOSE up -d --build
@@ -183,19 +133,20 @@ safe_env DB_USERNAME admin
 safe_env DB_PASSWORD password
 
 if [[ "$REDIS" == "y" ]]; then
-safe_env SESSION_DRIVER redis
-safe_env REDIS_HOST redis
+  safe_env SESSION_DRIVER redis
+  safe_env REDIS_HOST redis
 fi
 
 $COMPOSE exec app php artisan key:generate
 
 if [[ -n "$NODE" ]]; then
-$COMPOSE exec app npm install
-$COMPOSE exec app npm run build
+  $COMPOSE exec app npm install
 
-if [[ "$PRIME" == "y" ]]; then
-$COMPOSE exec app npm install primevue @primevue/themes primeicons
-fi
+  if [[ "$PRIME" == "y" ]]; then
+    $COMPOSE exec app npm install primevue @primevue/themes primeicons
+  fi
+
+  $COMPOSE exec app npm run build
 fi
 
 echo -e "${GREEN}✅ Ready: http://localhost:8080${NC}"
