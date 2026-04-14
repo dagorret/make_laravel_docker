@@ -113,9 +113,9 @@ main() {
 
   local PHP_VER
   PHP_VER="$(choose_option \
-    "Select the PHP version for the application" \
+    "Select the PHP version for the application (Debian 13 / trixie)" \
     "8.4" \
-    "8.4" "8.3" "8.2")"
+    "8.1" "8.2" "8.3" "8.4")"
 
   local PG_VER
   PG_VER="$(choose_option \
@@ -164,13 +164,13 @@ main() {
     sh -lc 'composer create-project laravel/laravel /tmp/laravel-src && cp -a /tmp/laravel-src/. /app/'
 
   cd "$SAFE_NAME"
+  mkdir -p docker/nginx
 
   echo
   echo -e "${GREEN}Stage 3/4 - Writing container configuration files...${NC}"
-  mkdir -p docker/nginx
 
   cat > Dockerfile <<EOF
-FROM php:${PHP_VER}-fpm
+FROM docker.io/library/php:${PHP_VER}-fpm-trixie
 
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     git curl unzip zip libpq-dev libpng-dev libzip-dev libicu-dev libonig-dev \\
@@ -220,7 +220,7 @@ EOF
   cat >> docker-compose.yml <<EOF
 
   db:
-    image: postgres:${PG_VER}-alpine
+    image: docker.io/library/postgres:${PG_VER}-alpine
     container_name: ${SAFE_NAME}_db
     environment:
       POSTGRES_DB: ${SAFE_NAME}_db
@@ -230,7 +230,7 @@ EOF
       - "5432:5432"
 
   nginx:
-    image: nginx:alpine
+    image: docker.io/library/nginx:alpine
     container_name: ${SAFE_NAME}_nginx
     ports:
       - "8080:80"
@@ -245,7 +245,7 @@ EOF
     cat >> docker-compose.yml <<EOF
 
   redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis:7-alpine
     container_name: ${SAFE_NAME}_redis
 EOF
   fi
@@ -254,7 +254,7 @@ EOF
     cat >> docker-compose.yml <<EOF
 
   adminer:
-    image: adminer:latest
+    image: docker.io/library/adminer:latest
     container_name: ${SAFE_NAME}_adminer
     ports:
       - "8081:8080"
