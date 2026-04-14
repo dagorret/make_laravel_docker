@@ -181,12 +181,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 EOF
 
   if [[ -n "$NODE_VER" ]]; then
-    cat >> Dockerfile <<EOF
+  cat >> Dockerfile <<EOF
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - \\
  && apt-get update && apt-get install -y --no-install-recommends nodejs \\
+ && node --version \\
+ && npm --version \\
  && rm -rf /var/lib/apt/lists/*
 EOF
-  fi
+fi
 
   if [[ "$USE_REDIS" == "y" ]]; then
     cat >> Dockerfile <<'EOF'
