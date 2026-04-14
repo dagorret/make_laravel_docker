@@ -110,7 +110,7 @@ remove_project_containers() {
 
 wait_for_container_running() {
   local name="$1"
-  local retries="${2:-40}"
+  local retries="${2:-50}"
   local delay="${3:-2}"
   local i
 
@@ -150,8 +150,28 @@ show_container_logs() {
   if container_exists "$name"; then
     echo
     echo -e "${YELLOW}Last logs for ${name}:${NC}"
-    podman logs --tail 80 "$name" || true
+    podman logs --tail 100 "$name" || true
   fi
+}
+
+fix_laravel_permissions() {
+  local container_name="$1"
+
+  (
+    cd /tmp
+    podman exec -i "$container_name" sh -lc '
+      cd /var/www
+
+      mkdir -p storage/framework/views \
+               storage/framework/cache \
+               storage/framework/sessions \
+               storage/framework/testing \
+               storage/framework/cache/data \
+               bootstrap/cache
+
+      chmod -R 777 storage bootstrap/cache
+    '
+  )
 }
 
 main() {
@@ -322,6 +342,8 @@ services:
     working_dir: /var/www
     volumes:
       - .:/var/www:Z
+    tmpfs:
+      - /tmp
     depends_on:
       - db
 EOF
@@ -446,7 +468,7 @@ EOF
   echo
   echo -e "${GREEN}Stage 5/5 - Waiting for app container and configuring Laravel...${NC}"
 
-  if ! wait_for_container_running "${SAFE_NAME}_app" 40 2; then
+  if ! wait_for_container_running "${SAFE_NAME}_app" 50 2; then
     echo -e "${RED}App container is not running: ${SAFE_NAME}_app${NC}"
     show_container_logs "${SAFE_NAME}_app"
     show_container_logs "${SAFE_NAME}_db"
@@ -471,6 +493,8 @@ EOF
       cp .env.example .env
     fi
 
+    safe_env APP_ENV local
+    safe_env APP_DEBUG true
     safe_env DB_CONNECTION pgsql
     safe_env DB_HOST db
     safe_env DB_PORT 5432
@@ -495,14 +519,26 @@ EOF
       safe_env MAIL_PORT 1025
       safe_env MAIL_USERNAME null
       safe_env MAIL_PASSWORD null
-      safe_env MAIL_FROM_ADDRESS "hello@example.com"
+      safe_env MAIL_FROM_ADDRESS hello@example.com
       safe_env MAIL_FROM_NAME "\"${SAFE_NAME}\""
     fi
   )
 
   echo
+  echo -e "${GREEN}Fixing Laravel writable directories...${NC}"
+  fix_laravel_permissions "${SAFE_NAME}_app"
+
+  echo
   echo -e "${GREEN}Generating application key...${NC}"
   run_in_app "${SAFE_NAME}_app" php artisan key:generate --force
+
+  echo
+  echo -e "${GREEN}Clearing Laravel caches...${NC}"
+  run_in_app "${SAFE_NAME}_app" php artisan optimize:clear || true
+  run_in_app "${SAFE_NAME}_app" php artisan config:clear || true
+  run_in_app "${SAFE_NAME}_app" php artisan route:clear || true
+  run_in_app "${SAFE_NAME}_app" php artisan view:clear || true
+  run_in_app "${SAFE_NAME}_app" php artisan cache:clear || true
 
   echo
   echo -e "${GREEN}Running database migrations...${NC}"
@@ -523,6 +559,11 @@ EOF
     echo -e "${GREEN}Building frontend assets...${NC}"
     run_in_app "${SAFE_NAME}_app" npm run build
   fi
+
+  echo
+  echo -e "${GREEN}Restarting web containers...${NC}"
+  podman restart "${SAFE_NAME}_app" >/dev/null
+  podman restart "${SAFE_NAME}_nginx" >/dev/null
 
   cat > "${PROJECT_PATH}/p" <<EOF
 #!/usr/bin/env bash
@@ -596,10 +637,8 @@ EOF
     echo -e "Adminer URL: ${BLUE}http://localhost:8081${NC}"
   fi
 
-  if [[ "$MAIL_SERVICE" == "mailpit" ]]; then
-    echo -e "Mailpit URL: ${BLUE}http://localhost:8025${NC}"
-  elif [[ "$MAIL_SERVICE" == "mailhog" ]]; then
-    echo -e "Mailhog URL: ${BLUE}http://localhost:8025${NC}"
+  if [[ "$MAIL_SERVICE" == "mailpit" || "$MAIL_SERVICE" == "mailhog" ]]; then
+    echo -e "Mail URL: ${BLUE}http://localhost:8025${NC}"
   fi
 
   echo -e "${BLUE}========================================${NC}"
