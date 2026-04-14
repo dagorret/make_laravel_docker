@@ -103,6 +103,12 @@ main() {
   local SAFE_NAME
   SAFE_NAME="$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
 
+  if [[ -e "$SAFE_NAME" ]]; then
+    echo -e "${RED}Target directory already exists: $SAFE_NAME${NC}"
+    echo "Remove it or choose another project name."
+    exit 1
+  fi
+
   local PHP_VER
   PHP_VER="$(choose_option \
     "Select the PHP version for the application" \
@@ -137,24 +143,16 @@ main() {
     "adminer" \
     "adminer" "none")"
 
-  if [[ -e "$SAFE_NAME" ]]; then
-    echo -e "${RED}Target directory already exists: $SAFE_NAME${NC}"
-    echo "Remove it or choose another project name."
-    exit 1
-  fi
-
-  mkdir -p "$SAFE_NAME"
-  cd "$SAFE_NAME"
-
   echo
-  echo -e "${GREEN}Creating Laravel project in $(pwd)...${NC}"
+  echo -e "${GREEN}Creating Laravel project in $(pwd)/${SAFE_NAME}...${NC}"
   podman run --rm \
     -u "$(id -u):$(id -g)" \
-    -v "$(pwd):/app" \
-    -w /app \
+    -v "$(pwd):/workspace" \
+    -w /workspace \
     docker.io/library/composer:2 \
-    composer create-project laravel/laravel .
+    composer create-project laravel/laravel "$SAFE_NAME"
 
+  cd "$SAFE_NAME"
   mkdir -p docker/nginx
 
   cat > Dockerfile <<EOF
