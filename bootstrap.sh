@@ -23,7 +23,7 @@ choose_option() {
   local options=("$@")
   local input
 
-  echo
+  echo >&2
   echo -e "${BLUE}${title}${NC}" >&2
   echo "Available options: ${options[*]}" >&2
   read -r -p "Enter value [${default}]: " input
@@ -88,9 +88,13 @@ main() {
   elif command -v podman-compose >/dev/null 2>&1; then
     COMPOSE_CMD="podman-compose"
   else
-    echo -e "${RED}Neither 'podman compose' nor 'podman-compose' was found.${NC}"
+    echo -e "${RED}Compose support is not installed for Podman.${NC}"
+    echo "Install it with:"
+    echo "  sudo apt update && sudo apt install podman-compose"
     exit 1
   fi
+
+  echo -e "${GREEN}Using compose command: ${COMPOSE_CMD}${NC}"
 
   echo
   read -r -p "Project name to create [app]: " NAME
@@ -135,11 +139,23 @@ main() {
 
   if [[ -e "$SAFE_NAME" ]]; then
     echo -e "${RED}Target directory already exists: $SAFE_NAME${NC}"
+    echo "Remove it or choose another project name."
     exit 1
   fi
 
-  mkdir -p "$SAFE_NAME/docker/nginx"
+  mkdir -p "$SAFE_NAME"
   cd "$SAFE_NAME"
+
+  echo
+  echo -e "${GREEN}Creating Laravel project in $(pwd)...${NC}"
+  podman run --rm \
+    -u "$(id -u):$(id -g)" \
+    -v "$(pwd):/app" \
+    -w /app \
+    docker.io/library/composer:2 \
+    composer create-project laravel/laravel .
+
+  mkdir -p docker/nginx
 
   cat > Dockerfile <<EOF
 FROM php:${PHP_VER}-fpm
@@ -258,15 +274,6 @@ server {
     }
 }
 EOF
-
-  echo
-  echo -e "${GREEN}Creating Laravel project...${NC}"
-  podman run --rm \
-    -u "$(id -u):$(id -g)" \
-    -v "$(pwd):/app" \
-    -w /app \
-    docker.io/library/composer:2 \
-    composer create-project laravel/laravel .
 
   echo
   echo -e "${GREEN}Starting containers...${NC}"
