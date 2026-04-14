@@ -81,6 +81,8 @@ main() {
   require_cmd grep
   require_cmd tr
   require_cmd id
+  require_cmd mkdir
+  require_cmd cp
 
   local COMPOSE_CMD
   if podman compose version >/dev/null 2>&1; then
@@ -144,15 +146,27 @@ main() {
     "adminer" "none")"
 
   echo
-  echo -e "${GREEN}Creating Laravel project in $(pwd)/${SAFE_NAME}...${NC}"
+  echo -e "${GREEN}Stage 1/4 - Creating project directory on host...${NC}"
+  mkdir -p "$SAFE_NAME"
+
+  if [[ ! -w "$SAFE_NAME" ]]; then
+    echo -e "${RED}The target directory is not writable: $(pwd)/$SAFE_NAME${NC}"
+    exit 1
+  fi
+
+  echo
+  echo -e "${GREEN}Stage 2/4 - Bootstrapping Laravel in a temporary container directory...${NC}"
   podman run --rm \
-    -u "$(id -u):$(id -g)" \
-    -v "$(pwd):/workspace" \
-    -w /workspace \
+    --userns=keep-id \
+    -v "$(pwd)/$SAFE_NAME:/app" \
+    -w /tmp \
     docker.io/library/composer:2 \
-    composer create-project laravel/laravel "$SAFE_NAME"
+    sh -lc 'composer create-project laravel/laravel /tmp/laravel-src && cp -a /tmp/laravel-src/. /app/'
 
   cd "$SAFE_NAME"
+
+  echo
+  echo -e "${GREEN}Stage 3/4 - Writing container configuration files...${NC}"
   mkdir -p docker/nginx
 
   cat > Dockerfile <<EOF
@@ -274,11 +288,9 @@ server {
 EOF
 
   echo
-  echo -e "${GREEN}Starting containers...${NC}"
+  echo -e "${GREEN}Stage 4/4 - Starting containers and configuring Laravel...${NC}"
   $COMPOSE_CMD up -d --build
 
-  echo
-  echo -e "${GREEN}Configuring Laravel environment...${NC}"
   safe_env DB_CONNECTION pgsql
   safe_env DB_HOST db
   safe_env DB_PORT 5432
@@ -297,11 +309,11 @@ EOF
   fi
 
   echo
-  echo -e "${GREEN}Generating app key...${NC}"
+  echo -e "${GREEN}Generating application key...${NC}"
   $COMPOSE_CMD exec -T app php artisan key:generate
 
   echo
-  echo -e "${GREEN}Running migrations...${NC}"
+  echo -e "${GREEN}Running database migrations...${NC}"
   $COMPOSE_CMD exec -T app php artisan migrate
 
   if [[ -n "$NODE_VER" ]]; then
