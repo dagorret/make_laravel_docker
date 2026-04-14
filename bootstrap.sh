@@ -74,6 +74,11 @@ container_exists() {
   podman container exists "$name" >/dev/null 2>&1
 }
 
+container_is_running() {
+  local name="$1"
+  podman inspect -f '{{.State.Running}}' "$name" 2>/dev/null | grep -qx 'true'
+}
+
 remove_project_containers() {
   local project="$1"
   local names=(
@@ -94,12 +99,12 @@ remove_project_containers() {
 
 wait_for_container_running() {
   local name="$1"
-  local retries="${2:-20}"
+  local retries="${2:-30}"
   local delay="${3:-2}"
   local i
 
   for ((i=1; i<=retries; i++)); do
-    if podman ps --format '{{.Names}}' | grep -Fx "$name" >/dev/null 2>&1; then
+    if container_is_running "$name"; then
       return 0
     fi
     sleep "$delay"
@@ -108,18 +113,27 @@ wait_for_container_running() {
   return 1
 }
 
-run_in_app() {
-  local container_name="$1"
+run_podman_stable() {
+  local stable_dir="$1"
   shift
+  (
+    cd "$stable_dir"
+    podman "$@"
+  )
+}
 
-  podman exec \
-    -i \
-    --workdir /var/www \
-    "$container_name" \
-    "$@"
+run_in_app() {
+  local stable_dir="$1"
+  local container_name="$2"
+  shift 2
+
+  run_podman_stable "$stable_dir" exec -i --workdir /var/www "$container_name" "$@"
 }
 
 main() {
+  local BASE_PATH
+  BASE_PATH="$(pwd -P)"
+
   clear
   echo -e "${BLUE}========================================${NC}"
   echo -e "${BLUE}   Laravel Podman Bootstrap            ${NC}"
@@ -201,8 +215,6 @@ main() {
     "adminer" \
     "adminer" "none")"
 
-  local BASE_PATH
-  BASE_PATH="$(pwd)"
   local PROJECT_PATH="${BASE_PATH}/${SAFE_NAME}"
 
   if [[ "$CLEANUP_OLD" == "y" ]]; then
@@ -226,20 +238,19 @@ main() {
 
   echo
   echo -e "${GREEN}Stage 2/5 - Bootstrapping Laravel in a temporary container directory...${NC}"
-  podman run --rm \
+  run_podman_stable "$BASE_PATH" run --rm \
     --userns=keep-id \
     -v "${PROJECT_PATH}:/app" \
     -w /tmp \
     docker.io/library/composer:2 \
     sh -lc 'composer create-project laravel/laravel /tmp/laravel-src && cp -a /tmp/laravel-src/. /app/'
 
-  cd "$PROJECT_PATH"
-  mkdir -p docker/nginx
+  mkdir -p "${PROJECT_PATH}/docker/nginx"
 
   echo
   echo -e "${GREEN}Stage 3/5 - Writing container configuration files...${NC}"
 
-  cat > Dockerfile <<EOF
+  cat > "${PROJECT_PATH}/Dockerfile" <<EOF
 FROM docker.io/library/php:${PHP_VER}-fpm-trixie
 
 RUN apt-get update && apt-get install -y --no-install-recommends \\
@@ -251,7 +262,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 EOF
 
   if [[ -n "$NODE_VER" ]]; then
-    cat >> Dockerfile <<EOF
+    cat >> "${PROJECT_PATH}/Dockerfile" <<EOF
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - \\
  && apt-get update && apt-get install -y --no-install-recommends nodejs \\
  && command -v node \\
@@ -263,17 +274,17 @@ EOF
   fi
 
   if [[ "$USE_REDIS" == "y" ]]; then
-    cat >> Dockerfile <<'EOF'
+    cat >> "${PROJECT_PATH}/Dockerfile" <<'EOF'
 RUN pecl install redis && docker-php-ext-enable redis
 EOF
   fi
 
-  cat >> Dockerfile <<'EOF'
+  cat >> "${PROJECT_PATH}/Dockerfile" <<'EOF'
 COPY --from=docker.io/library/composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www
 EOF
 
-  cat > docker-compose.yml <<EOF
+  cat > "${PROJECT_PATH}/docker-compose.yml" <<EOF
 services:
   app:
     build: .
@@ -286,12 +297,12 @@ services:
 EOF
 
   if [[ "$USE_REDIS" == "y" ]]; then
-    cat >> docker-compose.yml <<'EOF'
+    cat >> "${PROJECT_PATH}/docker-compose.yml" <<'EOF'
       - redis
 EOF
   fi
 
-  cat >> docker-compose.yml <<EOF
+  cat >> "${PROJECT_PATH}/docker-compose.yml" <<EOF
 
   db:
     image: docker.io/library/postgres:${PG_VER}-alpine
@@ -316,7 +327,7 @@ EOF
 EOF
 
   if [[ "$USE_REDIS" == "y" ]]; then
-    cat >> docker-compose.yml <<EOF
+    cat >> "${PROJECT_PATH}/docker-compose.yml" <<EOF
 
   redis:
     image: docker.io/library/redis:7-alpine
@@ -325,7 +336,7 @@ EOF
   fi
 
   if [[ "$DB_ADMIN" == "adminer" ]]; then
-    cat >> docker-compose.yml <<EOF
+    cat >> "${PROJECT_PATH}/docker-compose.yml" <<EOF
 
   adminer:
     image: docker.io/library/adminer:latest
@@ -337,7 +348,7 @@ EOF
 EOF
   fi
 
-  cat > docker/nginx/default.conf <<'EOF'
+  cat > "${PROJECT_PATH}/docker/nginx/default.conf" <<'EOF'
 server {
     listen 80;
     server_name _;
@@ -363,70 +374,76 @@ EOF
 
   echo
   echo -e "${GREEN}Stage 4/5 - Starting containers...${NC}"
-  $COMPOSE_CMD up -d --build
+  (
+    cd "$PROJECT_PATH"
+    $COMPOSE_CMD up -d --build
+  )
 
   echo
   echo -e "${GREEN}Stage 5/5 - Waiting for app container and configuring Laravel...${NC}"
 
-  if ! wait_for_container_running "${SAFE_NAME}_app" 20 2; then
+  if ! wait_for_container_running "${SAFE_NAME}_app" 30 2; then
     echo -e "${RED}App container is not running: ${SAFE_NAME}_app${NC}"
     podman ps -a
     exit 1
   fi
 
-  if ! podman exec "${SAFE_NAME}_app" test -f /var/www/artisan; then
+  if ! run_podman_stable "$BASE_PATH" exec "${SAFE_NAME}_app" test -f /var/www/artisan; then
     echo -e "${RED}Laravel was not found inside the app container.${NC}"
     exit 1
   fi
 
-  safe_env DB_CONNECTION pgsql
-  safe_env DB_HOST db
-  safe_env DB_PORT 5432
-  safe_env DB_DATABASE "${SAFE_NAME}_db"
-  safe_env DB_USERNAME admin
-  safe_env DB_PASSWORD password
+  (
+    cd "$PROJECT_PATH"
+    safe_env DB_CONNECTION pgsql
+    safe_env DB_HOST db
+    safe_env DB_PORT 5432
+    safe_env DB_DATABASE "${SAFE_NAME}_db"
+    safe_env DB_USERNAME admin
+    safe_env DB_PASSWORD password
 
-  if [[ "$USE_REDIS" == "y" ]]; then
-    safe_env REDIS_CLIENT phpredis
-    safe_env REDIS_HOST redis
-    safe_env REDIS_PORT 6379
-    safe_env REDIS_PASSWORD null
-    safe_env SESSION_DRIVER redis
-    safe_env CACHE_STORE redis
-    safe_env QUEUE_CONNECTION redis
-  fi
+    if [[ "$USE_REDIS" == "y" ]]; then
+      safe_env REDIS_CLIENT phpredis
+      safe_env REDIS_HOST redis
+      safe_env REDIS_PORT 6379
+      safe_env REDIS_PASSWORD null
+      safe_env SESSION_DRIVER redis
+      safe_env CACHE_STORE redis
+      safe_env QUEUE_CONNECTION redis
+    fi
+  )
 
   echo
   echo -e "${GREEN}Generating application key...${NC}"
-  run_in_app "${SAFE_NAME}_app" php artisan key:generate
+  run_in_app "$BASE_PATH" "${SAFE_NAME}_app" php artisan key:generate
 
   echo
   echo -e "${GREEN}Running database migrations...${NC}"
-  run_in_app "${SAFE_NAME}_app" php artisan migrate
+  run_in_app "$BASE_PATH" "${SAFE_NAME}_app" php artisan migrate
 
   if [[ -n "$NODE_VER" ]]; then
     echo
     echo -e "${GREEN}Installing frontend dependencies...${NC}"
-    run_in_app "${SAFE_NAME}_app" npm install
+    run_in_app "$BASE_PATH" "${SAFE_NAME}_app" npm install
 
     if [[ "$INSTALL_PRIMEVUE" == "y" ]]; then
       echo
       echo -e "${GREEN}Installing PrimeVue packages...${NC}"
-      run_in_app "${SAFE_NAME}_app" npm install primevue @primevue/themes primeicons
+      run_in_app "$BASE_PATH" "${SAFE_NAME}_app" npm install primevue @primevue/themes primeicons
     fi
 
     echo
     echo -e "${GREEN}Building frontend assets...${NC}"
-    run_in_app "${SAFE_NAME}_app" npm run build
+    run_in_app "$BASE_PATH" "${SAFE_NAME}_app" npm run build
   fi
 
-  cat > p <<'EOF'
+  cat > "${PROJECT_PATH}/p" <<'EOF'
 #!/usr/bin/env bash
 podman compose "$@"
 EOF
-  chmod +x p
+  chmod +x "${PROJECT_PATH}/p"
 
-  cat > README-LOCAL.txt <<EOF
+  cat > "${PROJECT_PATH}/README-LOCAL.txt" <<EOF
 Project: ${SAFE_NAME}
 
 Useful commands:
@@ -445,7 +462,7 @@ Application URL:
 EOF
 
   if [[ "$DB_ADMIN" == "adminer" ]]; then
-    cat >> README-LOCAL.txt <<EOF
+    cat >> "${PROJECT_PATH}/README-LOCAL.txt" <<EOF
 
 Adminer URL:
   http://localhost:8081
