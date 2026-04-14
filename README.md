@@ -38,3 +38,6 @@ A modern Laravel bootstrap script using **Podman**, with optional support for:
 ```bash
 chmod +x bootstrap.sh
 ./bootstrap.sh
+
+
+Then use p script (see)
