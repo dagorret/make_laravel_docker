@@ -4,74 +4,121 @@ set -Eeuo pipefail
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
+
+trap 'echo -e "\n${RED}❌ Error at line ${LINENO}. Aborting.${NC}"' ERR
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo -e "${RED}Missing required command: $1${NC}"
+    exit 1
+  }
+}
+
+choose_option() {
+  local title="$1"
+  local default="$2"
+  shift 2
+  local options=("$@")
+  local input
+
+  echo -e "\n${BLUE}${title}${NC}"
+  echo "Options: ${options[*]}"
+  read -r -p "Select [${default}]: " input
+  input="${input:-$default}"
+
+  for opt in "${options[@]}"; do
+    if [[ "$opt" == "$input" ]]; then
+      echo "$input"
+      return 0
+    fi
+  done
+
+  echo -e "${YELLOW}Invalid option. Using ${default}.${NC}" >&2
+  echo "$default"
+}
+
+choose_yes_no() {
+  local title="$1"
+  local default="$2"
+  local input
+
+  read -r -p "$title [$default]: " input
+  input="${input:-$default}"
+
+  case "$input" in
+    y|Y|yes|YES) echo "y" ;;
+    n|N|no|NO) echo "n" ;;
+    *) echo "$default" ;;
+  esac
+}
+
+safe_env() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" .env; then
+    sed -i "s|^${key}=.*|${key}=${value}|" .env
+  else
+    echo "${key}=${value}" >> .env
+  fi
+}
 
 clear
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}   🚀 Laravel Podman Bootstrap         ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
-# ====== INPUTS ======
+require_cmd podman
+require_cmd curl
+require_cmd sed
 
-read -p "Nombre del proyecto [app]: " PROJ_NAME
-PROJ_NAME=${PROJ_NAME:-app}
+if podman compose version >/dev/null 2>&1; then
+  COMPOSE="podman compose"
+else
+  COMPOSE="podman-compose"
+fi
 
-SAFE_NAME=$(echo "$PROJ_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')
+read -p "Project name [app]: " NAME
+NAME=${NAME:-app}
+SAFE=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')
 
-read -p "Versión PHP [8.4]: " PHP_VER
-PHP_VER=${PHP_VER:-8.4}
+PHP=$(choose_option "PHP Version" "8.4" "8.4" "8.3" "8.2")
+PG=$(choose_option "PostgreSQL Version" "17" "17" "16" "15")
 
-read -p "PostgreSQL [17]: " PG_VER
-PG_VER=${PG_VER:-17}
+read -p "Node version (empty = none): " NODE
+REDIS=$(choose_yes_no "Use Redis? (y/n)" "n")
+PRIME=$(choose_yes_no "Install PrimeVue? (y/n)" "n")
 
-read -p "Node (enter = no usar): " NODE_VER
-
-read -p "¿Instalar PrimeVue? (y/N): " PRIMEVUE
-PRIMEVUE=${PRIMEVUE:-n}
-
-read -p "¿Usar Redis? (y/N): " USE_REDIS
-USE_REDIS=${USE_REDIS:-n}
-
-# ====== SETUP ======
-
-mkdir -p "$SAFE_NAME"/docker/nginx
-cd "$SAFE_NAME"
-
-# ====== DOCKERFILE ======
+mkdir -p "$SAFE"/docker/nginx
+cd "$SAFE"
 
 cat > Dockerfile <<EOF
-FROM php:${PHP_VER}-fpm
+FROM php:${PHP}-fpm
 
 RUN apt-get update && apt-get install -y \\
     git curl unzip zip libpq-dev libpng-dev libzip-dev
 
 RUN docker-php-ext-install pdo_pgsql pgsql gd zip
-
 EOF
 
-# Node opcional
-if [[ -n "$NODE_VER" ]]; then
+if [[ -n "$NODE" ]]; then
 cat >> Dockerfile <<EOF
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - && \\
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE}.x | bash - && \\
     apt-get install -y nodejs
 EOF
 fi
 
-# Redis opcional
-if [[ "$USE_REDIS" == "y" ]]; then
+if [[ "$REDIS" == "y" ]]; then
 cat >> Dockerfile <<EOF
 RUN pecl install redis && docker-php-ext-enable redis
 EOF
 fi
 
 cat >> Dockerfile <<EOF
-
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
-
 WORKDIR /var/www
 EOF
-
-# ====== DOCKER COMPOSE ======
 
 cat > docker-compose.yml <<EOF
 services:
@@ -83,22 +130,11 @@ services:
       - db
 
   db:
-    image: postgres:${PG_VER}-alpine
+    image: postgres:${PG}-alpine
     environment:
-      POSTGRES_DB: ${SAFE_NAME}_db
+      POSTGRES_DB: ${SAFE}_db
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
-EOF
-
-if [[ "$USE_REDIS" == "y" ]]; then
-cat >> docker-compose.yml <<EOF
-
-  redis:
-    image: redis:alpine
-EOF
-fi
-
-cat >> docker-compose.yml <<EOF
 
   nginx:
     image: nginx:alpine
@@ -109,7 +145,13 @@ cat >> docker-compose.yml <<EOF
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
 EOF
 
-# ====== NGINX ======
+if [[ "$REDIS" == "y" ]]; then
+cat >> docker-compose.yml <<EOF
+
+  redis:
+    image: redis:alpine
+EOF
+fi
 
 cat > docker/nginx/default.conf <<'EOF'
 server {
@@ -128,42 +170,32 @@ server {
 }
 EOF
 
-# ====== LARAVEL ======
-
-echo -e "${GREEN}Instalando Laravel...${NC}"
-
+echo "Installing Laravel..."
 podman run --rm -v $(pwd):/app -w /app composer:2 \
-    composer create-project laravel/laravel .
+  composer create-project laravel/laravel .
 
-# ====== UP ======
+$COMPOSE up -d --build
 
-podman compose up -d --build
+safe_env DB_CONNECTION pgsql
+safe_env DB_HOST db
+safe_env DB_DATABASE ${SAFE}_db
+safe_env DB_USERNAME admin
+safe_env DB_PASSWORD password
 
-# ====== ENV ======
-
-sed -i "s/DB_CONNECTION=sqlite/DB_CONNECTION=pgsql/" .env
-sed -i "s/DB_HOST=127.0.0.1/DB_HOST=db/" .env
-sed -i "s/DB_DATABASE=laravel/DB_DATABASE=${SAFE_NAME}_db/" .env
-sed -i "s/DB_USERNAME=root/DB_USERNAME=admin/" .env
-sed -i "s/DB_PASSWORD=/DB_PASSWORD=password/" .env
-
-# Redis opcional
-if [[ "$USE_REDIS" == "y" ]]; then
-sed -i "s/SESSION_DRIVER=database/SESSION_DRIVER=redis/" .env
-sed -i "s/REDIS_HOST=127.0.0.1/REDIS_HOST=redis/" .env
+if [[ "$REDIS" == "y" ]]; then
+safe_env SESSION_DRIVER redis
+safe_env REDIS_HOST redis
 fi
 
-podman compose exec app php artisan key:generate
+$COMPOSE exec app php artisan key:generate
 
-# ====== FRONTEND ======
+if [[ -n "$NODE" ]]; then
+$COMPOSE exec app npm install
+$COMPOSE exec app npm run build
 
-if [[ -n "$NODE_VER" ]]; then
-podman compose exec app npm install
-podman compose exec app npm run build
-
-if [[ "$PRIMEVUE" == "y" ]]; then
-podman compose exec app npm install primevue @primevue/themes primeicons
+if [[ "$PRIME" == "y" ]]; then
+$COMPOSE exec app npm install primevue @primevue/themes primeicons
 fi
 fi
 
-echo -e "${GREEN}✅ Proyecto listo: http://localhost:8080${NC}"
+echo -e "${GREEN}✅ Ready: http://localhost:8080${NC}"
